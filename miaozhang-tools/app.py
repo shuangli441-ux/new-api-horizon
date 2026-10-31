@@ -7,12 +7,13 @@ import legacy_app as legacy
 import match_diagnostics as matchdiag
 import product_summary as summary
 import profitability as profit
+import profitability_orchestrator as orchestrator
 import reference_cost as reference
 from fastapi import Header
 
 app = legacy.app
 app.title = "Miaozhang Read Tool Service"
-app.version = "1.2.4"
+app.version = "1.3.0"
 
 _REPLACED = {"/health", "/tools/overview", "/tools/profitability", "/tools/purchases", "/tools/inventory", "/tools/products", "/tools/quality", "/tools/cost-diagnostics", "/tools/product-summary-check", "/tools/reference-cost", "/tools/match-diagnostics"}
 app.router.routes = [r for r in app.router.routes if getattr(r, "path", None) not in _REPLACED]
@@ -64,7 +65,7 @@ def startup_match_diag() -> None:
 
 @app.get("/health")
 def health() -> dict[str, Any]:
-    return {"ok": True, "service": "miaozhang-tool-service", "version": "1.2.4", "credentials_configured": bool(legacy.os.getenv("MZ_USERNAME") and legacy.os.getenv("MZ_PASSWORD")), "expected_owner_configured": bool(legacy.os.getenv("MZ_EXPECTED_OWNER_ID")), "expenses_complete": profit._bool_env("MZ_EXPENSES_COMPLETE", False), "read_only": True, "profit_guard": "enabled", "tools": ["overview", "profitability", "purchases", "inventory", "receivables", "payables", "cash", "products", "quality"], "admin_tools": ["cost-diagnostics", "product-summary-check", "reference-cost", "match-diagnostics"]}
+    return {"ok": True, "service": "miaozhang-tool-service", "version": "1.3.0", "credentials_configured": bool(legacy.os.getenv("MZ_USERNAME") and legacy.os.getenv("MZ_PASSWORD")), "expected_owner_configured": bool(legacy.os.getenv("MZ_EXPECTED_OWNER_ID")), "expenses_complete": profit._bool_env("MZ_EXPENSES_COMPLETE", False), "read_only": True, "profit_guard": "enabled", "tools": ["overview", "profitability", "purchases", "inventory", "receivables", "payables", "cash", "products", "quality"], "admin_tools": ["cost-diagnostics", "product-summary-check", "reference-cost", "match-diagnostics"]}
 
 @app.post("/tools/overview")
 def overview(req: legacy.ToolRequest, authorization: str | None = Header(default=None)):
@@ -72,7 +73,7 @@ def overview(req: legacy.ToolRequest, authorization: str | None = Header(default
 
 @app.post("/tools/profitability")
 def profitability(req: legacy.ToolRequest, authorization: str | None = Header(default=None)):
-    legacy._auth(authorization); start, end = legacy._scope(req.start, req.end); return profit.overview(start, end)
+    legacy._auth(authorization); start, end = legacy._scope(req.start, req.end); return orchestrator.analyze(start, end)
 
 @app.post("/tools/purchases")
 def purchases(req: legacy.ToolRequest, authorization: str | None = Header(default=None)):
