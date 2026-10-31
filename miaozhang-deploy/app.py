@@ -9,7 +9,7 @@ import requests
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
-app = FastAPI(title="Miaozhang Public Agent", version="2.0.2")
+app = FastAPI(title="Miaozhang Public Agent", version="2.1.0")
 
 MODEL_URL = os.getenv("MZ_MODEL_API_URL", "https://api.deepseek.com/chat/completions")
 MODEL_NAME = os.getenv("MZ_MODEL_NAME", "deepseek-flash")
@@ -80,7 +80,7 @@ def _call_tool(name: str, params: dict[str, Any]) -> dict[str, Any]:
     if token:
         headers["Authorization"] = f"Bearer {token}"
     try:
-        resp = requests.post(url, json=params, headers=headers, timeout=45)
+        resp = requests.post(url, json=params, headers=headers, timeout=90)
         if resp.status_code >= 400:
             return {"ok": False, "tool": name, "status": resp.status_code}
         return {"ok": True, "tool": name, "data": resp.json()}
@@ -89,17 +89,19 @@ def _call_tool(name: str, params: dict[str, Any]) -> dict[str, Any]:
 
 
 READ_TOOLS = {
-    "overview": "经营总览：销售、成本、毛利、费用、利润",
+    "overview": "经营总览：销售、采购、库存、应收、应付、现金和经营状态",
+    "profitability": "盈利能力与利润可信度：成本质量门、毛利、费用完整性、利润结论",
     "purchases": "采购与供应商分析",
     "inventory": "库存、压货、缺货和周转",
     "receivables": "应收欠款与客户风险",
     "payables": "应付欠款与供应商压力",
     "cash": "现金与收付款",
-    "products": "商品销售、毛利、亏损与热卖",
-    "quality": "数据质量和异常",
+    "products": "商品销售、毛利、亏损与热卖；成本异常商品不输出毛利",
+    "quality": "数据质量、成本异常和利润可用性",
 }
 
 WRITE_WORDS = ("开单", "新增", "创建", "删除", "修改", "导入", "上传", "付款", "收款登记", "库存调整", "权限")
+PROFIT_WORDS = ("赚不赚钱", "赚钱", "亏钱", "盈利", "利润", "毛利", "净利", "净利润", "利润率")
 
 
 @app.on_event("startup")
@@ -127,11 +129,12 @@ def health() -> dict[str, Any]:
     return {
         "ok": True,
         "service": "miaozhang-public-agent",
-        "version": "2.0.2",
+        "version": "2.1.0",
         "model_provider": os.getenv("MZ_MODEL_PROVIDER", "deepseek"),
         "model_configured": bool(os.getenv("MZ_MODEL_API_KEY")),
         "model_probe": MODEL_PROBE,
         "configured_tools": sorted(_tool_map()),
+        "profit_guard": "enabled",
         "write_enabled": False,
     }
 
@@ -144,6 +147,11 @@ def model_test(body: ModelTestRequest, authorization: str | None = Header(defaul
         {"role": "user", "content": body.prompt[:1000]},
     ], max_tokens=64)
     return {"ok": True, "model": os.getenv("MZ_MODEL_NAME", MODEL_NAME), "text": text[:500]}
+
+
+def _fallback_plan(task: str) -> dict[str, Any]:
+    name = "profitability" if any(word in task for word in PROFIT_WORDS) else "overview"
+    return {"tools": [{"name": name, "params": {}}], "goal": task}
 
 
 @app.post("/v1/agent")
@@ -163,7 +171,9 @@ def agent(body: AgentRequest, authorization: str | None = Header(default=None)) 
         "你是秒账经营智能体规划器。只输出JSON，不要Markdown。"
         "只能从给定read_tools中选择工具，不得编造工具。"
         "根据用户经营问题选择1到5个必要工具。"
-        "JSON格式：{\"tools\":[{\"name\":\"overview\",\"params\":{}}],\"goal\":\"...\"}。"
+        "只要用户询问赚钱、亏损、利润、毛利、净利或利润率，必须包含profitability工具。"
+        "如果用户还问钱为什么变少，再加cash、inventory、receivables、payables中必要的工具。"
+        "JSON格式：{\"tools\":[{\"name\":\"profitability\",\"params\":{}}],\"goal\":\"...\"}。"
     )
     plan_text = _model([
         {"role": "system", "content": system},
@@ -174,7 +184,14 @@ def agent(body: AgentRequest, authorization: str | None = Header(default=None)) 
         end = plan_text.rfind("}") + 1
         plan = json.loads(plan_text[start:end])
     except Exception:
-        plan = {"tools": [{"name": "overview", "params": {}}], "goal": task}
+        plan = _fallback_plan(task)
+
+    # Deterministic safety correction: profit questions can never accidentally skip profitability.
+    if any(word in task for word in PROFIT_WORDS):
+        tools = list(plan.get("tools") or [])
+        if not any(str((x or {}).get("name") or "") == "profitability" for x in tools):
+            tools.insert(0, {"name": "profitability", "params": {}})
+        plan["tools"] = tools[:5]
 
     results = []
     for item in (plan.get("tools") or [])[:5]:
@@ -186,7 +203,18 @@ def agent(body: AgentRequest, authorization: str | None = Header(default=None)) 
 
     if results and all(x.get("ok") for x in results):
         answer = _model([
-            {"role": "system", "content": "你是经营分析助手。只依据工具数据回答；先结论，再证据，再风险。必须区分毛利、经营利润和现金，不得编造数字。"},
+            {
+                "role": "system",
+                "content": (
+                    "你是经营分析助手。只依据工具数据回答；先结论，再证据，再风险。"
+                    "必须区分商品毛利、经营利润和现金。"
+                    "如果profit_verdict=data_anomaly，必须明确说暂不能确认赚不赚钱；"
+                    "不得把raw_profit_metrics_quarantined中的数字当作真实利润。"
+                    "reference_cost_scenario只能称为参考/估算情景，绝不能称为确认利润。"
+                    "如果expense_completeness.confirmed=false，不得把系统经营利润称为最终净利润。"
+                    "不得编造或补齐缺失数字。"
+                ),
+            },
             {"role": "user", "content": json.dumps({"task": task, "results": results}, ensure_ascii=False, default=str)},
         ], max_tokens=1600)
         return {"ok": True, "plan": plan, "results": results, "answer": answer}
@@ -195,6 +223,6 @@ def agent(body: AgentRequest, authorization: str | None = Header(default=None)) 
         "ok": True,
         "plan": plan,
         "results": results,
-        "answer": "模型规划已完成；当前秒账读取工具尚未配置到公开部署壳，因此没有编造经营数据。",
+        "answer": "模型规划已完成，但一个或多个秒账读取工具调用失败；没有编造经营数据。",
         "tool_configuration_required": True,
     }
