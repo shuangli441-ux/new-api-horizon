@@ -198,34 +198,3 @@ def agent(body: AgentRequest, authorization: str | None = Header(default=None)) 
         "answer": "模型规划已完成；当前秒账读取工具尚未配置到公开部署壳，因此没有编造经营数据。",
         "tool_configuration_required": True,
     }
-
-
-@app.on_event("startup")
-def startup_tool_probe() -> None:
-    if not _tool_map().get("overview"):
-        print("MZ_TOOL_PROBE=SKIP:overview_not_configured", flush=True)
-        return
-    result = _call_tool("overview", {"start": "2026-10-01", "end": "2026-10-31", "top_n": 5})
-    if result.get("ok"):
-        data = result.get("data") or {}
-        safe = {
-            "scope": data.get("scope"),
-            "sales_amount": data.get("sales_amount"),
-            "sales_cost": data.get("sales_cost"),
-            "gross_profit": data.get("gross_profit"),
-            "gross_margin": data.get("gross_margin"),
-            "operating_expense": data.get("operating_expense"),
-            "operating_profit": data.get("operating_profit"),
-            "operating_margin": data.get("operating_margin"),
-            "purchase_amount": data.get("purchase_amount"),
-            "inventory_amount": data.get("inventory_amount"),
-            "receivables": data.get("receivables"),
-            "payables": data.get("payables"),
-            "cash": data.get("cash"),
-            "data_quality": data.get("data_quality"),
-            "profit_definition": data.get("profit_definition"),
-        }
-        print("MZ_TOOL_PROBE=PASS", flush=True)
-        print("MZ_TOOL_PROBE_RESULT=" + json.dumps(safe, ensure_ascii=False, separators=(",", ":")), flush=True)
-    else:
-        print("MZ_TOOL_PROBE=FAIL:" + json.dumps(result, ensure_ascii=False, separators=(",", ":")), flush=True)
