@@ -9,10 +9,24 @@ from fastapi import Header
 
 app = legacy.app
 app.title = "Miaozhang Read Tool Service"
-app.version = "1.2.0"
+app.version = "1.2.1"
 
 _REPLACED = {"/health", "/tools/overview", "/tools/profitability", "/tools/purchases", "/tools/inventory", "/tools/products", "/tools/quality", "/tools/cost-diagnostics"}
 app.router.routes = [r for r in app.router.routes if getattr(r, "path", None) not in _REPLACED]
+
+
+@app.on_event("startup")
+def startup_cost_diag() -> None:
+    if str(legacy.os.getenv("MZ_STARTUP_COST_DIAG", "0")).strip().lower() not in {"1", "true", "yes", "on"}:
+        return
+    start = str(legacy.os.getenv("MZ_DIAG_START", "2026-10-01"))
+    end = str(legacy.os.getenv("MZ_DIAG_END", "2026-10-31"))
+    try:
+        result = diag.cost_schema(start, end)
+        print("MZ_COST_DIAG=PASS", flush=True)
+        print("MZ_COST_DIAG_RESULT=" + legacy.json.dumps(result, ensure_ascii=False, separators=(",", ":")), flush=True)
+    except Exception as exc:
+        print("MZ_COST_DIAG=FAIL:" + exc.__class__.__name__ + ":" + str(exc), flush=True)
 
 
 @app.get("/health")
@@ -20,7 +34,7 @@ def health() -> dict[str, Any]:
     return {
         "ok": True,
         "service": "miaozhang-tool-service",
-        "version": "1.2.0",
+        "version": "1.2.1",
         "credentials_configured": bool(legacy.os.getenv("MZ_USERNAME") and legacy.os.getenv("MZ_PASSWORD")),
         "expected_owner_configured": bool(legacy.os.getenv("MZ_EXPECTED_OWNER_ID")),
         "expenses_complete": profit._bool_env("MZ_EXPENSES_COMPLETE", False),
