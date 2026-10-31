@@ -9,7 +9,7 @@ import requests
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
-app = FastAPI(title="Miaozhang Public Agent", version="2.1.1")
+app = FastAPI(title="Miaozhang Public Agent", version="2.2.0")
 
 MODEL_URL = os.getenv("MZ_MODEL_API_URL", "https://api.deepseek.com/chat/completions")
 MODEL_NAME = os.getenv("MZ_MODEL_NAME", "deepseek-flash")
@@ -90,7 +90,7 @@ def _call_tool(name: str, params: dict[str, Any]) -> dict[str, Any]:
 
 READ_TOOLS = {
     "overview": "经营总览：销售、采购、库存、应收、应付、现金和经营状态",
-    "profitability": "盈利能力与利润可信度：成本质量门、毛利、费用完整性、利润结论",
+    "profitability": "盈利能力与利润可信度：成本质量门、跨报表校验、根因、现金压力和修复建议",
     "purchases": "采购与供应商分析",
     "inventory": "库存、压货、缺货和周转",
     "receivables": "应收欠款与客户风险",
@@ -102,6 +102,19 @@ READ_TOOLS = {
 
 WRITE_WORDS = ("开单", "新增", "创建", "删除", "修改", "导入", "上传", "付款", "收款登记", "库存调整", "权限")
 PROFIT_WORDS = ("赚不赚钱", "赚钱", "亏钱", "盈利", "利润", "毛利", "净利", "净利润", "利润率")
+
+BOSS_SYSTEM = (
+    "你是老板经营分析助手，只依据工具数据回答。"
+    "按顺序回答：1结论；2现金/资金状态；3最关键根因；4下一步动作。"
+    "必须区分商品毛利、系统经营利润、最终净利润和现金。"
+    "如果profit_verdict=data_anomaly，必须明确说暂不能确认赚不赚钱。"
+    "如果cost_root_cause存在，要用中文解释根因。"
+    "如果cash_signal或operating_signals显示负余额/净流出，要明确指出现金压力，但不得把现金流出等同亏损。"
+    "不得把raw_profit_metrics_quarantined中的数字作为经营结论，也不要主动复述这些隔离数字，除非用户明确询问审计线索。"
+    "reference_cost_scenario只能称为参考估算，绝不能称为确认利润。"
+    "如果expense_completeness.confirmed=false，不得把系统经营利润称为最终净利润。"
+    "优先采用repair_plan给出1到3个可执行动作。不得编造或补齐缺失数字。"
+)
 
 
 @app.on_event("startup")
@@ -150,19 +163,23 @@ def startup_profitability_probe() -> None:
         "receivables": data.get("receivables"),
         "payables": data.get("payables"),
         "cash_signal": data.get("cash_signal"),
+        "operating_signals": data.get("operating_signals"),
+        "cost_root_cause": data.get("cost_root_cause"),
+        "cost_root_cause_explanation": data.get("cost_root_cause_explanation"),
         "cost_quality": data.get("cost_quality"),
         "data_quality": data.get("data_quality"),
         "expense_completeness": data.get("expense_completeness"),
         "reference_cost_scenario": data.get("reference_cost_scenario"),
-        "raw_profit_metrics_quarantined": data.get("raw_profit_metrics_quarantined"),
+        "repair_plan": data.get("repair_plan"),
+        "profit_readiness": data.get("profit_readiness"),
     }
     print("MZ_PROFIT_PROBE=PASS", flush=True)
     print("MZ_PROFIT_PROBE_RESULT=" + json.dumps(safe, ensure_ascii=False, separators=(",", ":")), flush=True)
     try:
         answer = _model([
-            {"role": "system", "content": "只依据提供的数据回答。若profit_verdict=data_anomaly，必须说暂不能确认赚不赚钱；不得把隔离原始利润当真实利润；参考成本情景必须明确称估算。用3到5句中文。"},
+            {"role": "system", "content": BOSS_SYSTEM + " 用4到7句中文，面向门店老板。"},
             {"role": "user", "content": json.dumps(safe, ensure_ascii=False, default=str)},
-        ], max_tokens=360)
+        ], max_tokens=500)
         print("MZ_PROFIT_PROBE_MODEL=" + json.dumps(answer, ensure_ascii=False), flush=True)
     except Exception as exc:
         print("MZ_PROFIT_PROBE_MODEL=FAIL:" + exc.__class__.__name__, flush=True)
@@ -173,7 +190,7 @@ def health() -> dict[str, Any]:
     return {
         "ok": True,
         "service": "miaozhang-public-agent",
-        "version": "2.1.1",
+        "version": "2.2.0",
         "model_provider": os.getenv("MZ_MODEL_PROVIDER", "deepseek"),
         "model_configured": bool(os.getenv("MZ_MODEL_API_KEY")),
         "model_probe": MODEL_PROBE,
@@ -216,7 +233,8 @@ def agent(body: AgentRequest, authorization: str | None = Header(default=None)) 
         "只能从给定read_tools中选择工具，不得编造工具。"
         "根据用户经营问题选择1到5个必要工具。"
         "只要用户询问赚钱、亏损、利润、毛利、净利或利润率，必须包含profitability工具。"
-        "如果用户还问钱为什么变少，再加cash、inventory、receivables、payables中必要的工具。"
+        "profitability已经包含利润质量、现金信号和成本根因，不要无意义重复调用工具。"
+        "如果用户明确要求客户欠款、供应商欠款、具体库存或商品排行，再增加对应工具。"
         "JSON格式：{\"tools\":[{\"name\":\"profitability\",\"params\":{}}],\"goal\":\"...\"}。"
     )
     plan_text = _model([
@@ -246,18 +264,7 @@ def agent(body: AgentRequest, authorization: str | None = Header(default=None)) 
 
     if results and all(x.get("ok") for x in results):
         answer = _model([
-            {
-                "role": "system",
-                "content": (
-                    "你是经营分析助手。只依据工具数据回答；先结论，再证据，再风险。"
-                    "必须区分商品毛利、经营利润和现金。"
-                    "如果profit_verdict=data_anomaly，必须明确说暂不能确认赚不赚钱；"
-                    "不得把raw_profit_metrics_quarantined中的数字当作真实利润。"
-                    "reference_cost_scenario只能称为参考/估算情景，绝不能称为确认利润。"
-                    "如果expense_completeness.confirmed=false，不得把系统经营利润称为最终净利润。"
-                    "不得编造或补齐缺失数字。"
-                ),
-            },
+            {"role": "system", "content": BOSS_SYSTEM},
             {"role": "user", "content": json.dumps({"task": task, "results": results}, ensure_ascii=False, default=str)},
         ], max_tokens=1600)
         return {"ok": True, "plan": plan, "results": results, "answer": answer}
