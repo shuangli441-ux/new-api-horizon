@@ -19,8 +19,9 @@ def main() -> int:
             json={
                 "model": model,
                 "messages": [{"role": "user", "content": "只回答 OK"}],
+                "thinking": {"type": "disabled"},
                 "temperature": 0,
-                "max_tokens": 8,
+                "max_tokens": 16,
             },
             headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
             timeout=30,
