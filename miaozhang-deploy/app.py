@@ -9,10 +9,11 @@ import requests
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
-app = FastAPI(title="Miaozhang Public Agent", version="2.0.0")
+app = FastAPI(title="Miaozhang Public Agent", version="2.0.1")
 
 MODEL_URL = os.getenv("MZ_MODEL_API_URL", "https://api.deepseek.com/chat/completions")
 MODEL_NAME = os.getenv("MZ_MODEL_NAME", "deepseek-flash")
+MODEL_PROBE = {"attempted": False, "live": False, "status": None}
 
 
 class AgentRequest(BaseModel):
@@ -100,14 +101,35 @@ READ_TOOLS = {
 WRITE_WORDS = ("开单", "新增", "创建", "删除", "修改", "导入", "上传", "付款", "收款登记", "库存调整", "权限")
 
 
+@app.on_event("startup")
+def startup_probe() -> None:
+    if not os.getenv("MZ_MODEL_API_KEY"):
+        return
+    MODEL_PROBE["attempted"] = True
+    try:
+        text = _model([
+            {"role": "system", "content": "连接测试，只回答 OK。"},
+            {"role": "user", "content": "OK"},
+        ], max_tokens=8)
+        MODEL_PROBE["live"] = bool(text)
+        MODEL_PROBE["status"] = "ok" if text else "empty"
+    except HTTPException as exc:
+        MODEL_PROBE["live"] = False
+        MODEL_PROBE["status"] = f"upstream_{exc.status_code}"
+    except Exception:
+        MODEL_PROBE["live"] = False
+        MODEL_PROBE["status"] = "request_failed"
+
+
 @app.get("/health")
 def health() -> dict[str, Any]:
     return {
         "ok": True,
         "service": "miaozhang-public-agent",
-        "version": "2.0.0",
+        "version": "2.0.1",
         "model_provider": os.getenv("MZ_MODEL_PROVIDER", "deepseek"),
         "model_configured": bool(os.getenv("MZ_MODEL_API_KEY")),
+        "model_probe": MODEL_PROBE,
         "configured_tools": sorted(_tool_map()),
         "write_enabled": False,
     }
