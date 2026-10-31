@@ -9,7 +9,7 @@ import requests
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
-app = FastAPI(title="Miaozhang Public Agent", version="2.1.0")
+app = FastAPI(title="Miaozhang Public Agent", version="2.1.1")
 
 MODEL_URL = os.getenv("MZ_MODEL_API_URL", "https://api.deepseek.com/chat/completions")
 MODEL_NAME = os.getenv("MZ_MODEL_NAME", "deepseek-flash")
@@ -124,12 +124,56 @@ def startup_probe() -> None:
         MODEL_PROBE["status"] = "request_failed"
 
 
+@app.on_event("startup")
+def startup_profitability_probe() -> None:
+    if str(os.getenv("MZ_STARTUP_PROFIT_PROBE", "0")).strip().lower() not in {"1", "true", "yes", "on"}:
+        return
+    start = str(os.getenv("MZ_PROBE_START", "2026-10-01"))
+    end = str(os.getenv("MZ_PROBE_END", "2026-10-31"))
+    result = _call_tool("profitability", {"start": start, "end": end, "top_n": 5})
+    if not result.get("ok"):
+        print("MZ_PROFIT_PROBE=FAIL:" + json.dumps(result, ensure_ascii=False, separators=(",", ":")), flush=True)
+        return
+    data = result.get("data") or {}
+    safe = {
+        "scope": data.get("scope"),
+        "profit_verdict": data.get("profit_verdict"),
+        "profit_confidence": data.get("profit_confidence"),
+        "conclusion": data.get("conclusion"),
+        "sales_amount": data.get("sales_amount"),
+        "sales_cost": data.get("sales_cost"),
+        "gross_profit": data.get("gross_profit"),
+        "gross_margin": data.get("gross_margin"),
+        "operating_expense": data.get("operating_expense"),
+        "operating_profit": data.get("operating_profit"),
+        "inventory_amount": data.get("inventory_amount"),
+        "receivables": data.get("receivables"),
+        "payables": data.get("payables"),
+        "cash_signal": data.get("cash_signal"),
+        "cost_quality": data.get("cost_quality"),
+        "data_quality": data.get("data_quality"),
+        "expense_completeness": data.get("expense_completeness"),
+        "reference_cost_scenario": data.get("reference_cost_scenario"),
+        "raw_profit_metrics_quarantined": data.get("raw_profit_metrics_quarantined"),
+    }
+    print("MZ_PROFIT_PROBE=PASS", flush=True)
+    print("MZ_PROFIT_PROBE_RESULT=" + json.dumps(safe, ensure_ascii=False, separators=(",", ":")), flush=True)
+    try:
+        answer = _model([
+            {"role": "system", "content": "只依据提供的数据回答。若profit_verdict=data_anomaly，必须说暂不能确认赚不赚钱；不得把隔离原始利润当真实利润；参考成本情景必须明确称估算。用3到5句中文。"},
+            {"role": "user", "content": json.dumps(safe, ensure_ascii=False, default=str)},
+        ], max_tokens=360)
+        print("MZ_PROFIT_PROBE_MODEL=" + json.dumps(answer, ensure_ascii=False), flush=True)
+    except Exception as exc:
+        print("MZ_PROFIT_PROBE_MODEL=FAIL:" + exc.__class__.__name__, flush=True)
+
+
 @app.get("/health")
 def health() -> dict[str, Any]:
     return {
         "ok": True,
         "service": "miaozhang-public-agent",
-        "version": "2.1.0",
+        "version": "2.1.1",
         "model_provider": os.getenv("MZ_MODEL_PROVIDER", "deepseek"),
         "model_configured": bool(os.getenv("MZ_MODEL_API_KEY")),
         "model_probe": MODEL_PROBE,
@@ -186,7 +230,6 @@ def agent(body: AgentRequest, authorization: str | None = Header(default=None)) 
     except Exception:
         plan = _fallback_plan(task)
 
-    # Deterministic safety correction: profit questions can never accidentally skip profitability.
     if any(word in task for word in PROFIT_WORDS):
         tools = list(plan.get("tools") or [])
         if not any(str((x or {}).get("name") or "") == "profitability" for x in tools):
