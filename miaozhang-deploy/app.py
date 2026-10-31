@@ -9,7 +9,7 @@ import requests
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
-app = FastAPI(title="Miaozhang Public Agent", version="2.0.1")
+app = FastAPI(title="Miaozhang Public Agent", version="2.0.2")
 
 MODEL_URL = os.getenv("MZ_MODEL_API_URL", "https://api.deepseek.com/chat/completions")
 MODEL_NAME = os.getenv("MZ_MODEL_NAME", "deepseek-flash")
@@ -43,6 +43,7 @@ def _model(messages: list[dict[str, str]], max_tokens: int = 1200) -> str:
     payload = {
         "model": os.getenv("MZ_MODEL_NAME", MODEL_NAME),
         "messages": messages,
+        "thinking": {"type": "disabled"},
         "temperature": 0.1,
         "max_tokens": max_tokens,
     }
@@ -110,7 +111,7 @@ def startup_probe() -> None:
         text = _model([
             {"role": "system", "content": "连接测试，只回答 OK。"},
             {"role": "user", "content": "OK"},
-        ], max_tokens=8)
+        ], max_tokens=16)
         MODEL_PROBE["live"] = bool(text)
         MODEL_PROBE["status"] = "ok" if text else "empty"
     except HTTPException as exc:
@@ -126,7 +127,7 @@ def health() -> dict[str, Any]:
     return {
         "ok": True,
         "service": "miaozhang-public-agent",
-        "version": "2.0.1",
+        "version": "2.0.2",
         "model_provider": os.getenv("MZ_MODEL_PROVIDER", "deepseek"),
         "model_configured": bool(os.getenv("MZ_MODEL_API_KEY")),
         "model_probe": MODEL_PROBE,
