@@ -4,5 +4,6 @@ WORKDIR /app
 COPY requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 COPY app.py ./app.py
+COPY probe.py ./probe.py
 EXPOSE 10000
-CMD ["/bin/sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${PORT:-10000}"]
+CMD ["/bin/sh", "-c", "python probe.py && uvicorn app:app --host 0.0.0.0 --port ${PORT:-10000}"]
